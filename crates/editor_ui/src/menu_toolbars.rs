@@ -17,11 +17,7 @@ use space_shared::{ext::egui_file, *};
 use space_undo::{AddedEntity, NewChange, RemovedEntity};
 
 use crate::{
-    hierarchy::{HierarchyQueryIter, HierarchyTabState},
-    icons::{add_bundle_icon, add_entity_icon, delete_entity_icon, prefab_icon},
-    sizing::{to_colored_richtext, to_richtext},
-    ui_registration::{BundleReg, EditorBundleUntyped},
-    ShowEditorUi,
+    ShowEditorUi, hierarchy::{HierarchyQueryIter, HierarchyTabState}, icons::{add_bundle_icon, add_entity_icon, delete_entity_icon, play_icon, prefab_icon}, sizing::{to_colored_richtext, to_richtext}, ui_registration::{BundleReg, EditorBundleUntyped},
 };
 
 use crate::{colors::*, sizing::Sizing};
@@ -299,16 +295,22 @@ pub fn top_menu(
 ) {
     let ctx = ctxs.ctx_mut();
     egui::TopBottomPanel::top("top_menu_bar")
-        .min_height(&sizing.icon.to_size() + 8.)
+        /*.min_height(&sizing.icon.to_size() + 8.)*/
+        .exact_height(32.0)
+        .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(Margin::ZERO))
         .show(ctx, |ui| {
-            ui.style_mut().spacing.menu_margin = Margin::symmetric(16., 8.);
+            //ui.style_mut().spacing.menu_margin = Margin::symmetric(16., 8.);
+            //ui.style_mut().spacing.menu_margin = Margin::ZERO;
+            let bar_height = ui.available_height();
             egui::menu::bar(ui, |ui| {
                 let stl = ui.style_mut();
-                stl.spacing.button_padding = egui::Vec2::new(8., 4.);
+                stl.spacing.button_padding = egui::Vec2::new(4., 2.);
+                //stl.spacing.button = egui::Vec2::ZERO;
 
                 // Open Assets Folder
-                let open_button = egui::Button::new(to_richtext("📂", &sizing.icon))
-                    .stroke(stroke_default_color());
+                // 📂 Original
+                let open_button = egui::Button::new(to_label("File", sizing.text))
+                    .min_size(egui::vec2(0.0, bar_height));
                 if ui.add(open_button).clicked() {
                     let mut dialog = egui_file::FileDialog::open_file(Some("assets/".into()))
                         .show_files_filter(Box::new(|path| {
@@ -349,10 +351,10 @@ pub fn top_menu(
                     }
                 }
                 // END Open Assets Folder
-
+                // 💾 Original
                 // Save file
-                let file_button = egui::Button::new(to_richtext("💾", &sizing.icon))
-                    .stroke(stroke_default_color());
+                let file_button = egui::Button::new(to_label("Save", sizing.text))
+                    .min_size(egui::vec2(0.0, bar_height));
                 if ui
                     .add(file_button)
                     .on_hover_text("Save current scene")
@@ -394,10 +396,10 @@ pub fn top_menu(
                     }
                 }
                 // End Save File
-
+                // 📤 Original
                 // Load Scene
-                let load_button = egui::Button::new(to_richtext("📤", &sizing.icon))
-                    .stroke(stroke_default_color());
+                let load_button = egui::Button::new(to_label("Load Scene", sizing.text))
+                    .min_size(egui::vec2(0.0, bar_height));
                 if ui
                     .add(load_button)
                     .on_hover_text("Load scene file")
@@ -444,8 +446,8 @@ pub fn top_menu(
                 // END Load Scene
 
                 // Open GLTF
-                let open_gltf_button =
-                    prefab_icon(sizing.icon.to_size(), "").stroke(stroke_default_color());
+                let open_gltf_button = egui::Button::new(to_label("Open GLTF/GLB", sizing.text))
+                    .min_size(egui::vec2(0.0, bar_height));
                 if ui
                     .add(open_gltf_button)
                     .on_hover_text("Open GLTF/GLB as prefab")
@@ -487,10 +489,10 @@ pub fn top_menu(
                     }
                 }
                 // End Open GLTF
-
+                // 📦 Original
                 //Open subscene
-                let subscene_button = egui::Button::new(to_richtext("📦", &sizing.icon))
-                    .stroke(stroke_default_color());
+                let subscene_button = egui::Button::new(to_label("Open Subscene", sizing.text))
+                    .min_size(egui::vec2(0.0, bar_height));
                 if ui
                     .add(subscene_button)
                     .on_hover_text("Open subscene")
@@ -537,21 +539,12 @@ pub fn top_menu(
                     }
                 }
 
-                let width = ui.available_width();
-                let distance = width / 2. - 40.;
-                ui.add_space(distance);
-                let play_button =
-                    egui::Button::new(to_colored_richtext("▶", &sizing.icon, PLAY_COLOR))
-                        .fill(SPECIAL_BG_COLOR)
-                        .stroke(Stroke {
-                            width: 1.,
-                            color: STROKE_COLOR,
-                        });
-                if ui.add(play_button).clicked() {
-                    editor_events.send(EditorEvent::StartGame);
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let width = ui.available_width();
+                    //let distance = width / 2. - 40.;
+                    ui.add_space(15.0);
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |ui| {
+                    // First, draw the window for toasts
                     if toasts.has_toasts() {
                         egui::Window::new("Errors")
                             .default_size(egui::Vec2::new(80., 32.))
@@ -589,6 +582,8 @@ pub fn top_menu(
                                 })
                             });
                     }
+
+                    // Then handle the in bar UI
                     if ui
                         .button(
                             RichText::new(format!("⚠ {}", toasts.toasts_per_kind.warning.len()))
@@ -614,6 +609,12 @@ pub fn top_menu(
                         .clicked()
                     {
                         menu_state.show_toasts = !menu_state.show_toasts;
+                    }
+
+                    // Button to start the game
+                    let play_button = play_icon(sizing.small_icon.to_size(), "Play");
+                    if ui.add(play_button).clicked() {
+                        editor_events.send(EditorEvent::StartGame);
                     }
 
                     if !background_tasks.tasks.is_empty() {
