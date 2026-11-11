@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use bevy::{ecs::query::QueryFilter, prelude::*, utils::HashMap};
 use bevy_egui::{
-    egui::{collapsing_header::CollapsingState, TextEdit},
-    *,
+    egui::{Label, PointerButton, TextEdit, collapsing_header::CollapsingState}, *,
 };
 use space_editor_core::prelude::*;
 use space_prefab::{component::SceneAutoChild, editor_registry::EditorRegistry};
@@ -14,7 +13,7 @@ use space_shared::*;
 
 use space_editor_tabs::prelude::*;
 
-use crate::{colors::WARN_COLOR, editor_tab_name::EditorTabName};
+use crate::{colors::WARN_COLOR, editor_tab_name::EditorTabName, ui_components::bundle_menus, ui_registration::BundleReg};
 
 /// Event to clone entity with clone all registered components
 #[derive(Event)]
@@ -49,6 +48,7 @@ pub struct HierarchyTabState {
     pub show_editor_entities: bool,
     pub show_spawnable_bundles: bool,
     pub entity_filter: String,
+    pub anchor: Option<Entity>
 }
 
 pub type HierarchyQueryIter<'a> = (
@@ -57,6 +57,33 @@ pub type HierarchyQueryIter<'a> = (
     Option<&'a Children>,
     Option<&'a Parent>,
 );
+
+/// Rebuilt every frame while the hierarchy draws, so it matches the screen.
+#[derive(Default)]
+struct VisibleRows {
+    order: Vec<Entity>,
+    click: Option<RowClick>,
+}
+
+impl VisibleRows {
+    /// Rows from `anchor` to `clicked` inclusive, in either direction.
+    fn range(&self, anchor: Entity, clicked: Entity) -> Option<&[Entity]> {
+        let a = self.order.iter().position(|e| *e == anchor)?;
+        let b = self.order.iter().position(|e| *e == clicked)?;
+        Some(&self.order[a.min(b)..=a.max(b)])
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RowClick { Select(Entity), Toggle(Entity), Range(Entity, bool) }
+
+impl RowClick {
+    fn from_modifiers(entity: Entity, m: egui::Modifiers) -> Self {
+        if m.shift { return Self::Range(entity, m.command); }
+        if m.command { return Self::Toggle(entity); }
+        Self::Select(entity)
+    }
+}
 
 /// System to show hierarchy
 pub fn show_hierarchy(
@@ -69,6 +96,7 @@ pub fn show_hierarchy(
     mut changes: EventWriter<NewChange>,
     mut state: ResMut<HierarchyTabState>,
     auto_children: Query<(), With<SceneAutoChild>>,
+    bundles: Res<BundleReg>
 ) {
     let mut all: Vec<_> = if state.show_editor_entities {
         all_entities.iter().collect()
@@ -77,6 +105,8 @@ pub fn show_hierarchy(
     };
     all.sort_by_key(|a| a.0);
     let ui = &mut ui.0;
+
+    // Draw Search Bar
     ui.horizontal(|ui| {
         let button_size = ui
             .style()
@@ -95,12 +125,29 @@ pub fn show_hierarchy(
     ui.spacing();
     let lower_filter = state.entity_filter.to_lowercase();
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    // Draw Hierarchy Empty Context Menu
+    let area = ui.available_rect_before_wrap();
+    let bg = ui.interact(area, ui.id().with("hierarchy_bg"), egui::Sense::click());
+    bg.context_menu(|ui| {
+        hierarchy_empty_context(ui, &query, &mut selected, &mut commands, &mut changes, &bundles);
+    });
+
+    if query.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add(Label::new("No Entities in Hierarchy").selectable(false));
+        });
+    }
+
+    let mut rows = VisibleRows::default();
+
+    // Draw Scene Entities
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for (entity, _name, _children, parent) in all.iter().filter(|(_, name, _, _)| {
             name.map(|n| n.to_lowercase())
                 .unwrap_or_else(|| "entity".to_string())
                 .contains(&lower_filter)
         }) {
+            // Draw entities without Parents
             if parent.is_none() {
                 if state.show_editor_entities {
                     draw_entity::<()>(
@@ -112,7 +159,10 @@ pub fn show_hierarchy(
                         &mut clone_events,
                         &mut changes,
                         &auto_children,
+                        &bundles,
+                        &mut rows
                     );
+                // Draw entities with Parents
                 } else {
                     draw_entity::<With<PrefabMarker>>(
                         &mut commands,
@@ -123,11 +173,15 @@ pub fn show_hierarchy(
                         &mut clone_events,
                         &mut changes,
                         &auto_children,
+                        &bundles,
+                        &mut rows
                     );
                 }
             }
         }
     });
+
+    handle_selection(&mut rows, &mut state.anchor, &mut selected, &mut commands);
 }
 
 type DrawIter<'a> = (
@@ -137,6 +191,7 @@ type DrawIter<'a> = (
     Option<&'a Parent>,
 );
 
+// Draws Scene Entities with context to the UI
 fn draw_entity<F: QueryFilter>(
     commands: &mut Commands,
     ui: &mut egui::Ui,
@@ -146,10 +201,13 @@ fn draw_entity<F: QueryFilter>(
     clone_events: &mut EventWriter<CloneEvent>,
     changes: &mut EventWriter<NewChange>,
     auto_children: &Query<(), With<SceneAutoChild>>,
+    bundles: &BundleReg,
+    rows: &mut VisibleRows
 ) {
     let Ok((_, name, children, parent)) = query.get(entity) else {
         return;
     };
+    rows.order.push(entity);
 
     let entity_name = name.map_or_else(
         || format!("Entity ({})", entity),
@@ -172,7 +230,9 @@ fn draw_entity<F: QueryFilter>(
             }
 
             let response = ui.selectable_label(is_selected, entity_name);
-            let is_clicked = response.clicked();
+            let is_clicked = response.clicked()
+                || (response.clicked_by(PointerButton::Secondary) && !is_selected);
+
             if is_auto_child {
                 response.context_menu(|ui| {
                     if ui.button("Delete").clicked() {
@@ -190,25 +250,13 @@ fn draw_entity<F: QueryFilter>(
                         clone_events,
                         selected,
                         parent,
+                        bundles
                     );
                 });
             }
 
             if is_clicked {
-                if is_selected {
-                    commands.entity(entity).remove::<Selected>();
-                    info!("Removed selected: {:?}", entity);
-                } else {
-                    commands.entity(entity).insert(Selected);
-
-                    //check shift pressed
-                    if !ui.input(|i| i.modifiers.shift) {
-                        selected.iter_mut().for_each(|e| {
-                            commands.entity(e).remove::<Selected>();
-                        })
-                    }
-                    info!("Added selected: {:?}", entity);
-                }
+                rows.click = Some(RowClick::from_modifiers(entity, ui.input(|i| i.modifiers)));
             }
         })
         .body(|ui| {
@@ -223,6 +271,8 @@ fn draw_entity<F: QueryFilter>(
                     clone_events,
                     changes,
                     auto_children,
+                    bundles,
+                    rows
                 );
             }
         });
@@ -234,7 +284,8 @@ fn draw_entity<F: QueryFilter>(
         }
 
         let selectable = ui.selectable_label(is_selected, entity_name);
-        let is_clicked = selectable.clicked();
+        let is_clicked = selectable.clicked()
+            || (selectable.clicked_by(PointerButton::Secondary) && !is_selected);
 
         if is_auto_child {
             selectable.context_menu(|ui| {
@@ -253,27 +304,117 @@ fn draw_entity<F: QueryFilter>(
                     clone_events,
                     selected,
                     parent,
+                    bundles
                 );
             });
         }
 
         if is_clicked {
-            if is_selected {
-                commands.entity(entity).remove::<Selected>();
-                info!("Removed selected: {:?}", entity);
-            } else {
-                commands.entity(entity).insert(Selected);
-
-                //check shift pressed
-                if !ui.input(|i| i.modifiers.shift) {
-                    selected.iter_mut().for_each(|e| {
-                        commands.entity(e).remove::<Selected>();
-                    })
-                }
-                info!("Added selected: {:?}", entity);
-            }
+            rows.click = Some(RowClick::from_modifiers(entity, ui.input(|i| i.modifiers)));
         }
     };
+}
+
+fn handle_selection(
+    rows: &mut VisibleRows,
+    anchor: &mut Option<Entity>,
+    selected: &mut Query<Entity, With<Selected>>,
+    commands: &mut Commands<'_, '_>,
+) {
+    let Some(click) = rows.click else { return; };
+
+    let click = match click {
+        RowClick::Range(e, _) if anchor.and_then(|a| rows.range(a, e)).is_none() => RowClick::Select(e),
+        other => other
+    };
+
+    match click {
+        RowClick::Toggle(entity) => {
+            if selected.contains(entity) {
+                commands.entity(entity).remove::<Selected>();
+            }
+            else {
+                commands.entity(entity).insert(Selected);
+            }
+
+            *anchor = Some(entity);
+        }
+
+
+        RowClick::Select(entity) => {
+            for s in selected.iter().filter(|s| *s != entity) {
+                commands.entity(s).remove::<Selected>();
+            }
+
+            commands.entity(entity).insert(Selected);
+            *anchor = Some(entity);
+        }
+
+
+        RowClick::Range(entity, additive) => {
+            let Some(range) = anchor.and_then(|a| rows.range(a, entity)) else { return; };
+            if !additive {
+                for s in selected.iter().filter(|s| !range.contains(s)) {
+                    commands.entity(s).remove::<Selected>();
+                }
+            }
+
+            for r in range {
+                commands.entity(*r).insert(Selected);
+            }
+        }
+    }
+}
+
+fn hierarchy_empty_context(
+    ui: &mut egui::Ui,
+    query: &Query<HierarchyQueryIter, With<PrefabMarker>>,
+    selected: &mut Query<Entity, With<Selected>>,
+    commands: &mut Commands<'_, '_>,
+    changes: &mut EventWriter<'_, NewChange>,
+    bundles: &BundleReg
+) {
+    if ui.button("New Entity").clicked() {
+        let id = commands.spawn_empty().insert((PrefabMarker, Transform::default())).id();
+        changes.send(NewChange {
+            change: Arc::new(AddedEntity { entity: id }),
+        });
+        ui.close_menu();
+    }
+
+    if ui.button("Select All").clicked() {
+        for (entity, ..) in query.iter()
+        {
+            commands.entity(entity).insert(Selected);
+        }
+        ui.close_menu();
+    }
+
+    // Create a deselect all button if there is more than one entity selected
+    if !selected.is_empty() {
+        if ui.button("Deselect All").clicked() {
+            selected.iter_mut().for_each(|e| {
+                commands.entity(e).remove::<Selected>();
+            });
+        }
+    }
+    // Show a deselect all label if there are no entities selected
+    else {
+        ui.label("Deselect All");
+    }
+
+    // Show bundle menu
+    let mut picked = None;
+    ui.menu_button("Add Bundle", |ui| {
+        picked = bundle_menus(ui, bundles);
+    });
+
+    if let Some(bundle) = picked {
+       let entity = bundle.spawn(commands);
+       changes.send(NewChange {
+           change: Arc::new(AddedEntity { entity }),
+       });
+    }
 }
 
 fn hierarchy_entity_context(
@@ -284,33 +425,76 @@ fn hierarchy_entity_context(
     clone_events: &mut EventWriter<'_, CloneEvent>,
     selected: &mut Query<'_, '_, Entity, With<Selected>>,
     parent: Option<&Parent>,
+    bundles: &BundleReg
 ) {
+    // Spawn and select new entity
     if ui.button("Add child").clicked() {
-        let new_id = commands.spawn_empty().insert(PrefabMarker).id();
-        commands.entity(entity).add_child(new_id);
-        changes.send(NewChange {
-            change: Arc::new(AddedEntity { entity: new_id }),
-        });
+        for target in selected.iter() {
+            // Create and child the new entity
+            let new_id = commands.spawn_empty().insert((PrefabMarker, Transform::default())).id();
+            commands.entity(target).add_child(new_id);
+
+            changes.send(NewChange {
+                change: Arc::new(AddedEntity { entity: new_id }),
+            });
+
+            // Select new entity and de-select current
+            commands.entity(target).remove::<Selected>();
+            commands.entity(new_id).insert(Selected);
+        }
         ui.close_menu();
     }
+
     if ui.button("Delete").clicked() {
-        commands.entity(entity).despawn_recursive();
-        changes.send(NewChange {
-            change: Arc::new(RemovedEntity { entity }),
-        });
+        for target in selected.iter() {
+            commands.entity(target).despawn_recursive();
+            changes.send(NewChange {
+                change: Arc::new(RemovedEntity { entity: target }),
+            });
+        }
         ui.close_menu();
     }
+
     if ui.button("Clone").clicked() {
-        clone_events.send(CloneEvent { id: entity });
+        for target in selected.iter() {
+            clone_events.send(CloneEvent { id: target });
+        }
         ui.close_menu();
     }
+
     if !selected.is_empty() && !selected.contains(entity) && ui.button("Attach to").clicked() {
-        for e in selected.iter() {
-            commands.entity(entity).add_child(e);
+        for target in selected.iter() {
+            commands.entity(entity).add_child(target);
         }
     }
+
     if parent.is_some() && ui.button("Detach").clicked() {
-        commands.entity(entity).remove_parent();
+        for target in selected.iter() {
+            commands.entity(target).remove_parent();
+        }
+    }
+
+    // Show bundle menu
+    //let picked = bundle_menus(ui, bundles);
+
+    let mut picked = None;
+    ui.menu_button("Add Bundle", |ui| {
+        picked = bundle_menus(ui, bundles);
+    });
+
+    if let Some(bundle) = picked {
+        for target in selected.iter() {
+            let bundle = bundle.spawn(commands);
+            commands.entity(target).add_child(bundle);
+
+            changes.send(NewChange {
+                change: Arc::new(AddedEntity { entity: bundle }),
+            });
+
+            commands.entity(target).remove::<Selected>();
+            commands.entity(bundle).insert(Selected);
+        }
+        ui.close_menu();
     }
 }
 

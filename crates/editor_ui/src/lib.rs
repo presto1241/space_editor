@@ -18,6 +18,9 @@ pub mod debug_panels;
 /// This module contains Game view tab logic
 pub mod game_view;
 
+/// This module contains shared ui component logic
+pub mod ui_components;
+
 /// This module contains Hierarchy tab logic
 pub mod hierarchy;
 
