@@ -6,6 +6,7 @@ use egui_dock::egui::{Color32, RichText};
 #[reflect(Resource, Default, InspectorOptions)]
 pub struct Sizing {
     pub icon: IconSize,
+    pub small_icon: IconSize,
     pub gizmos: IconSize,
     #[inspector(min = 12.0, max = 24.0)]
     pub text: f32,
@@ -15,6 +16,7 @@ impl Default for Sizing {
     fn default() -> Self {
         Self {
             icon: IconSize::Regular,
+            small_icon: IconSize::Small,
             gizmos: IconSize::Gizmos,
             text: 14.,
         }
@@ -74,6 +76,7 @@ mod test {
 
         let expected = Sizing {
             icon: IconSize::Regular,
+            small_icon: IconSize::Small,
             gizmos: IconSize::Gizmos,
             text: 14.,
         };
